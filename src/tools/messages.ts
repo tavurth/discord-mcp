@@ -7,6 +7,7 @@ import {
   MessageReaction,
   Routes,
   DiscordAPIError,
+  AttachmentBuilder,
 } from "discord.js";
 import { z } from "zod";
 import { discord, getTextChannel, fetchChannelChecked } from "../client.js";
@@ -89,6 +90,70 @@ const tools = [
       return {
         content: [{ type: "text", text: `✅ Message sent (id: ${sent.id}) in #${channel.name}.` }],
       };
+    },
+  }),
+  defineTool({
+    name: "discord_send_file",
+    description:
+      "Send one or more files to a channel. Files are read from disk and attached to the message. Optionally include a text message with the files. Max 8MB per file, 10 files max. Returns the new message ID.",
+    annotations: {
+      title: "Send file",
+      readOnlyHint: false,
+      destructiveHint: false,
+      idempotentHint: false,
+      openWorldHint: true,
+    },
+    schema: z.object({
+      channel_id: snowflake.describe("ID (snowflake) of the target channel or thread."),
+      file_paths: z
+        .array(z.string())
+        .min(1)
+        .max(10)
+        .describe("Array of file paths to send (max 10 files)."),
+      content: z
+        .string()
+        .optional()
+        .describe("Optional text message to send with the files (max 2000 characters)."),
+    }),
+    handle: async ({ channel_id, file_paths, content }) => {
+      const fs = await import("fs/promises");
+      const path = await import("path");
+      const channel = await getTextChannel(channel_id);
+
+      const files: AttachmentBuilder[] = [];
+      const errors: string[] = [];
+
+      for (const filePath of file_paths) {
+        try {
+          const resolved = path.resolve(filePath);
+          const stat = await fs.stat(resolved);
+          if (stat.size > 8_000_000) {
+            errors.push(`${filePath}: too large (${Math.round(stat.size / 1_000_000)}MB > 8MB)`);
+            continue;
+          }
+          const attachment = new AttachmentBuilder(resolved);
+          files.push(attachment);
+        } catch (e: any) {
+          errors.push(`${filePath}: ${e.message || "not found"}`);
+        }
+      }
+
+      if (files.length === 0) {
+        return {
+          content: [{ type: "text", text: `❌ No files could be sent: ${errors.join("; ")}` }],
+        };
+      }
+
+      const sent = await channel.send({
+        content: content || undefined,
+        files,
+      });
+
+      let result = `✅ Sent ${files.length} file(s) (id: ${sent.id}) in #${channel.name}.`;
+      if (errors.length > 0) {
+        result += `\n⚠️ Failed: ${errors.join("; ")}`;
+      }
+      return { content: [{ type: "text", text: result }] };
     },
   }),
   defineTool({
