@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { AttachmentBuilder } from "discord.js";
 import { discord } from "../client.js";
 import { buildEmbed, embedFieldsShape } from "../embeds.js";
 import { defineTool, defineModule, snowflake, intIn, structured } from "./define.js";
@@ -60,6 +61,70 @@ const tools = [
           { type: "text", text: `✅ DM embed sent to ${user.username} (message id: ${sent.id}).` },
         ],
       };
+    },
+  }),
+  defineTool({
+    name: "discord_send_dm_file",
+    description:
+      "Send one or more files as a private direct message to a user. Files are read from disk and attached to the message. Optionally include a text message with the files. Max 8MB per file, 10 files max. Returns the new message ID.",
+    annotations: {
+      title: "Send DM file",
+      readOnlyHint: false,
+      destructiveHint: false,
+      idempotentHint: false,
+      openWorldHint: true,
+    },
+    schema: z.object({
+      user_id: userId,
+      file_paths: z
+        .array(z.string())
+        .min(1)
+        .max(10)
+        .describe("Array of file paths to send (max 10 files)."),
+      content: z
+        .string()
+        .optional()
+        .describe("Optional text message to send with the files (max 2000 characters)."),
+    }),
+    handle: async ({ user_id, file_paths, content }) => {
+      const fs = await import("fs/promises");
+      const path = await import("path");
+      const user = await discord.users.fetch(user_id);
+
+      const files: AttachmentBuilder[] = [];
+      const errors: string[] = [];
+
+      for (const filePath of file_paths) {
+        try {
+          const resolved = path.resolve(filePath);
+          const stat = await fs.stat(resolved);
+          if (stat.size > 8_000_000) {
+            errors.push(`${filePath}: too large (${Math.round(stat.size / 1_000_000)}MB > 8MB)`);
+            continue;
+          }
+          const attachment = new AttachmentBuilder(resolved);
+          files.push(attachment);
+        } catch (e: any) {
+          errors.push(`${filePath}: ${e.message || "not found"}`);
+        }
+      }
+
+      if (files.length === 0) {
+        return {
+          content: [{ type: "text", text: `❌ No files could be sent: ${errors.join("; ")}` }],
+        };
+      }
+
+      const sent = await user.send({
+        content: content || undefined,
+        files,
+      });
+
+      let result = `✅ Sent ${files.length} file(s) to ${user.username} (id: ${sent.id}).`;
+      if (errors.length > 0) {
+        result += `\n⚠️ Failed: ${errors.join("; ")}`;
+      }
+      return { content: [{ type: "text", text: result }] };
     },
   }),
   defineTool({
